@@ -5,6 +5,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/panjf2000/ants/v2"
 )
 
 // Cron keeps track of any number of entries, invoking the associated func as
@@ -24,6 +26,7 @@ type Cron struct {
 	parser    ScheduleParser
 	nextID    EntryID
 	jobWaiter sync.WaitGroup
+	gpool     *ants.Pool
 }
 
 // ScheduleParser is an interface for schedule spec parsers that return a Schedule
@@ -111,6 +114,11 @@ func (s byTime) Less(i, j int) bool {
 //
 // See "cron.With*" to modify the default behavior.
 func New(opts ...Option) *Cron {
+	pool, err := ants.NewPool(ants.DefaultAntsPoolSize, ants.WithExpiryDuration(time.Minute))
+	if err != nil {
+		return nil
+	}
+
 	c := &Cron{
 		entries:   nil,
 		chain:     NewChain(),
@@ -123,6 +131,7 @@ func New(opts ...Option) *Cron {
 		logger:    DefaultLogger,
 		location:  time.Local,
 		parser:    standardParser,
+		gpool:     pool,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -231,6 +240,9 @@ func (c *Cron) Run() {
 	}
 	c.running = true
 	c.runningMu.Unlock()
+	if c.gpool != nil {
+		defer c.gpool.Release()
+	}
 	c.run()
 }
 
@@ -270,7 +282,8 @@ func (c *Cron) run() {
 					if e.Next.After(now) || e.Next.IsZero() {
 						break
 					}
-					c.startJob(e.WrappedJob)
+					c.jobWaiter.Add(1)
+					c.gpool.Submit(taskFuncWrapper(e.WrappedJob, &c.jobWaiter))
 					e.Prev = e.Next
 					e.Next = e.Schedule.Next(now)
 					c.logger.Info("run", "now", now, "entry", e.ID, "next", e.Next)
@@ -301,6 +314,14 @@ func (c *Cron) run() {
 
 			break
 		}
+	}
+}
+
+func taskFuncWrapper(job interface{}, wg *sync.WaitGroup) func() {
+	return func() {
+		j := job.(Job)
+		j.Run()
+		wg.Done()
 	}
 }
 
