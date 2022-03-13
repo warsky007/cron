@@ -14,6 +14,7 @@ import (
 // be inspected while running.
 type Cron struct {
 	entries   []*Entry
+	sm        sync.Map // use this map to store entry index
 	chain     Chain
 	stop      chan struct{}
 	add       chan *Entry
@@ -84,21 +85,28 @@ func (e Entry) Valid() bool { return e.ID != 0 }
 
 // byTime is a wrapper for sorting the entry array by time
 // (with zero time at the end).
-type byTime []*Entry
+type byTime struct {
+	entries []*Entry
+	sm      *sync.Map
+}
 
-func (s byTime) Len() int      { return len(s) }
-func (s byTime) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
+func (s byTime) Len() int { return len(s.entries) }
+func (s byTime) Swap(i, j int) {
+	s.entries[i], s.entries[j] = s.entries[j], s.entries[i]
+	s.sm.Store(s.entries[i].ID, i)
+	s.sm.Store(s.entries[j].ID, j)
+}
 func (s byTime) Less(i, j int) bool {
 	// Two zero times should return false.
 	// Otherwise, zero is "greater" than any other time.
 	// (To sort it at the end of the list.)
-	if s[i].Next.IsZero() {
+	if s.entries[i].Next.IsZero() {
 		return false
 	}
-	if s[j].Next.IsZero() {
+	if s.entries[j].Next.IsZero() {
 		return true
 	}
-	return s[i].Next.Before(s[j].Next)
+	return s.entries[i].Next.Before(s.entries[j].Next)
 }
 
 // New returns a new Cron job runner, modified by the given options.
@@ -192,6 +200,7 @@ func (c *Cron) Schedule(schedule Schedule, cmd Job, maxRuns int) EntryID {
 		MaxRuns:    maxRuns,
 	}
 	if !c.running {
+		c.sm.Store(entry.ID, len(c.entries))
 		c.entries = append(c.entries, entry)
 	} else {
 		c.add <- entry
@@ -277,7 +286,7 @@ func (c *Cron) run() {
 
 	for {
 		// Determine the next entry to run.
-		sort.Sort(byTime(c.entries))
+		sort.Sort(byTime{c.entries, &c.sm})
 
 		var timer *time.Timer
 		if len(c.entries) == 0 || c.entries[0].Next.IsZero() {
@@ -293,7 +302,6 @@ func (c *Cron) run() {
 			case now = <-timer.C:
 				now = now.In(c.location)
 				c.logger.Info("wake", "now", now)
-
 				// Run every entry whose next time was less than now
 				for _, e := range c.entries {
 					if e.Next.After(now) || e.Next.IsZero() {
@@ -315,6 +323,7 @@ func (c *Cron) run() {
 				timer.Stop()
 				now = c.now()
 				newEntry.Next = newEntry.Schedule.Next(now)
+				c.sm.Store(newEntry.ID, len(c.entries))
 				c.entries = append(c.entries, newEntry)
 				c.logger.Info("added", "now", now, "entry", newEntry.ID, "next", newEntry.Next)
 
@@ -389,10 +398,25 @@ func (c *Cron) entrySnapshot() []Entry {
 
 func (c *Cron) removeEntry(id EntryID) {
 	var entries []*Entry
-	for _, e := range c.entries {
-		if e.ID != id {
-			entries = append(entries, e)
+
+	// use sync.Map to get index
+	v, ok := c.sm.LoadAndDelete(id)
+	if ok {
+		index := v.(int)
+		endIndex := len(c.entries) - 1
+		if index != len(c.entries)-1 {
+			// swap this entry to the end of the array, then delete
+			c.entries[index], c.entries[endIndex] = c.entries[endIndex], c.entries[index]
+			c.sm.Store(c.entries[index].ID, index)
 		}
+		c.entries = c.entries[:endIndex]
+	} else {
+		for _, e := range c.entries {
+			if e.ID != id {
+				entries = append(entries, e)
+			}
+		}
+		c.entries = entries
 	}
-	c.entries = entries
+
 }
