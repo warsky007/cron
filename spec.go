@@ -5,6 +5,7 @@ import "time"
 // SpecSchedule specifies a duty cycle (to the second granularity), based on a
 // traditional crontab specification. It is computed initially and stored as bit sets.
 type SpecSchedule struct {
+	MilliSecond *Bitmap
 	Second, Minute, Hour, Dom, Month, Dow uint64
 
 	// Override location for this schedule.
@@ -19,11 +20,12 @@ type bounds struct {
 
 // The bounds for each field.
 var (
-	seconds = bounds{0, 59, nil}
-	minutes = bounds{0, 59, nil}
-	hours   = bounds{0, 23, nil}
-	dom     = bounds{1, 31, nil}
-	months  = bounds{1, 12, map[string]uint{
+	milliseconds = bounds{0, 999, nil}
+	seconds      = bounds{0, 59, nil}
+	minutes      = bounds{0, 59, nil}
+	hours        = bounds{0, 23, nil}
+	dom          = bounds{1, 31, nil}
+	months       = bounds{1, 12, map[string]uint{
 		"jan": 1,
 		"feb": 2,
 		"mar": 3,
@@ -79,7 +81,7 @@ func (s *SpecSchedule) Next(t time.Time) time.Time {
 	}
 
 	// Start at the earliest possible time (the upcoming second).
-	t = t.Add(1*time.Second - time.Duration(t.Nanosecond())*time.Nanosecond)
+	t = t.Add(time.Millisecond - time.Duration(t.Nanosecond())%time.Millisecond)
 
 	// This flag indicates whether a field has been incremented.
 	added := false
@@ -167,6 +169,18 @@ WRAP:
 		t = t.Add(1 * time.Second)
 
 		if t.Second() == 0 {
+			goto WRAP
+		}
+	}
+
+	for !s.MilliSecond.Has(uint(t.Nanosecond()/1e6)) {
+		if !added {
+			added = true
+			t = t.Truncate(time.Millisecond)
+		}
+		t = t.Add(1 * time.Millisecond)
+
+		if t.Nanosecond()/1e6 == 0 {
 			goto WRAP
 		}
 	}

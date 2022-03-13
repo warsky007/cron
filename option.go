@@ -14,6 +14,14 @@ func WithLocation(loc *time.Location) Option {
 	}
 }
 
+// WithMilliSeconds overrides the parser used for interpreting job schedules to
+// include a milliseconds field as the first one.
+func WithMilliSeconds() Option {
+	return WithParser(NewParser(
+		MilliSecond | Second | Minute | Hour | Dom | Month | Dow | Descriptor,
+	))
+}
+
 // WithSeconds overrides the parser used for interpreting job schedules to
 // include a seconds field as the first one.
 func WithSeconds() Option {

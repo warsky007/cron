@@ -15,7 +15,8 @@ import (
 type ParseOption int
 
 const (
-	Second         ParseOption = 1 << iota // Seconds field, default 0
+	MilliSecond    ParseOption = 1 << iota // MilliSeconds field, default 0
+	Second                                 // Seconds field, default 0
 	SecondOptional                         // Optional seconds field, default 0
 	Minute                                 // Minutes field, default 0
 	Hour                                   // Hours field, default 0
@@ -27,6 +28,7 @@ const (
 )
 
 var places = []ParseOption{
+	MilliSecond,
 	Second,
 	Minute,
 	Hour,
@@ -36,6 +38,7 @@ var places = []ParseOption{
 }
 
 var defaults = []string{
+	"0",
 	"0",
 	"0",
 	"0",
@@ -129,26 +132,33 @@ func (p Parser) Parse(spec string) (Schedule, error) {
 		return bits
 	}
 
+	millisecondField := func(field string, r bounds) *Bitmap {
+		bitmap, _ := getMillisecondField(field, r)
+		return bitmap
+	}
+
 	var (
-		second     = field(fields[0], seconds)
-		minute     = field(fields[1], minutes)
-		hour       = field(fields[2], hours)
-		dayofmonth = field(fields[3], dom)
-		month      = field(fields[4], months)
-		dayofweek  = field(fields[5], dow)
+		millisecond = millisecondField(fields[0], milliseconds)
+		second      = field(fields[1], seconds)
+		minute      = field(fields[2], minutes)
+		hour        = field(fields[3], hours)
+		dayofmonth  = field(fields[4], dom)
+		month       = field(fields[5], months)
+		dayofweek   = field(fields[6], dow)
 	)
 	if err != nil {
 		return nil, err
 	}
 
 	return &SpecSchedule{
-		Second:   second,
-		Minute:   minute,
-		Hour:     hour,
-		Dom:      dayofmonth,
-		Month:    month,
-		Dow:      dayofweek,
-		Location: loc,
+		MilliSecond: millisecond,
+		Second:      second,
+		Minute:      minute,
+		Hour:        hour,
+		Dom:         dayofmonth,
+		Month:       month,
+		Dow:         dayofweek,
+		Location:    loc,
 	}, nil
 }
 
@@ -246,19 +256,29 @@ func getField(field string, r bounds) (uint64, error) {
 	return bits, nil
 }
 
-// getRange returns the bits indicated by the given expression:
-//   number | number "-" number [ "/" number ]
-// or error parsing range.
-func getRange(expr string, r bounds) (uint64, error) {
+// getMillisecondField returns an Int with the bits set representing all of the times that
+// the field represents or error parsing field value.  A "field" is a comma-separated
+// list of "ranges".
+func getMillisecondField(field string, r bounds) (*Bitmap, error) {
+	bitmap := NewBitmap()
+	ranges := strings.FieldsFunc(field, func(r rune) bool { return r == ',' })
+	for _, expr := range ranges {
+		if start, end, step, _, err := parseExpr(expr, r); err == nil {
+			getMillisecondBits(start, end, step, bitmap)
+		} else {
+			return bitmap, err
+		}
+	}
+	return bitmap, nil
+}
+
+func parseExpr(expr string, r bounds) (start, end, step uint, extra uint64, err error) {
 	var (
-		start, end, step uint
-		rangeAndStep     = strings.Split(expr, "/")
-		lowAndHigh       = strings.Split(rangeAndStep[0], "-")
-		singleDigit      = len(lowAndHigh) == 1
-		err              error
+		rangeAndStep = strings.Split(expr, "/")
+		lowAndHigh   = strings.Split(rangeAndStep[0], "-")
+		singleDigit  = len(lowAndHigh) == 1
 	)
 
-	var extra uint64
 	if lowAndHigh[0] == "*" || lowAndHigh[0] == "?" {
 		start = r.min
 		end = r.max
@@ -266,7 +286,7 @@ func getRange(expr string, r bounds) (uint64, error) {
 	} else {
 		start, err = parseIntOrName(lowAndHigh[0], r.names)
 		if err != nil {
-			return 0, err
+			return 0, 0, 0, 0, err
 		}
 		switch len(lowAndHigh) {
 		case 1:
@@ -274,10 +294,10 @@ func getRange(expr string, r bounds) (uint64, error) {
 		case 2:
 			end, err = parseIntOrName(lowAndHigh[1], r.names)
 			if err != nil {
-				return 0, err
+				return 0, 0, 0, 0, err
 			}
 		default:
-			return 0, fmt.Errorf("too many hyphens: %s", expr)
+			return 0, 0, 0, 0, fmt.Errorf("too many hyphens: %s", expr)
 		}
 	}
 
@@ -287,7 +307,7 @@ func getRange(expr string, r bounds) (uint64, error) {
 	case 2:
 		step, err = mustParseInt(rangeAndStep[1])
 		if err != nil {
-			return 0, err
+			return 0, 0, 0, 0, err
 		}
 
 		// Special handling: "N/step" means "N-max/step".
@@ -298,23 +318,34 @@ func getRange(expr string, r bounds) (uint64, error) {
 			extra = 0
 		}
 	default:
-		return 0, fmt.Errorf("too many slashes: %s", expr)
+		return 0, 0, 0, 0, fmt.Errorf("too many slashes: %s", expr)
 	}
 
 	if start < r.min {
-		return 0, fmt.Errorf("beginning of range (%d) below minimum (%d): %s", start, r.min, expr)
+		return 0, 0, 0, 0, fmt.Errorf("beginning of range (%d) below minimum (%d): %s", start, r.min, expr)
 	}
 	if end > r.max {
-		return 0, fmt.Errorf("end of range (%d) above maximum (%d): %s", end, r.max, expr)
+		return 0, 0, 0, 0, fmt.Errorf("end of range (%d) above maximum (%d): %s", end, r.max, expr)
 	}
 	if start > end {
-		return 0, fmt.Errorf("beginning of range (%d) beyond end of range (%d): %s", start, end, expr)
+		return 0, 0, 0, 0, fmt.Errorf("beginning of range (%d) beyond end of range (%d): %s", start, end, expr)
 	}
 	if step == 0 {
-		return 0, fmt.Errorf("step of range should be a positive number: %s", expr)
+		return 0, 0, 0, 0, fmt.Errorf("step of range should be a positive number: %s", expr)
 	}
 
-	return getBits(start, end, step) | extra, nil
+	return
+}
+
+// getRange returns the bits indicated by the given expression:
+//   number | number "-" number [ "/" number ]
+// or error parsing range.
+func getRange(expr string, r bounds) (uint64, error) {
+	if start, end, step, extra, err := parseExpr(expr, r); err == nil {
+		return getBits(start, end, step) | extra, nil
+	} else {
+		return 0, err
+	}
 }
 
 // parseIntOrName returns the (possibly-named) integer contained in expr.
@@ -356,6 +387,13 @@ func getBits(min, max, step uint) uint64 {
 	return bits
 }
 
+// getMillisecondBits sets all bits in the range [min, max], modulo the given step size.
+func getMillisecondBits(min, max, step uint, bitmap *Bitmap) {
+	for i := min; i <= max; i += step {
+		bitmap.Set(i)
+	}
+}
+
 // all returns all bits within the given bounds.  (plus the star bit)
 func all(r bounds) uint64 {
 	return getBits(r.min, r.max, 1) | starBit
@@ -363,60 +401,68 @@ func all(r bounds) uint64 {
 
 // parseDescriptor returns a predefined schedule for the expression, or error if none matches.
 func parseDescriptor(descriptor string, loc *time.Location) (Schedule, error) {
+	bitmap := NewBitmap()
+	bitmap.Set(milliseconds.min)
+
 	switch descriptor {
 	case "@yearly", "@annually":
 		return &SpecSchedule{
-			Second:   1 << seconds.min,
-			Minute:   1 << minutes.min,
-			Hour:     1 << hours.min,
-			Dom:      1 << dom.min,
-			Month:    1 << months.min,
-			Dow:      all(dow),
-			Location: loc,
+			MilliSecond: bitmap,
+			Second:      1 << seconds.min,
+			Minute:      1 << minutes.min,
+			Hour:        1 << hours.min,
+			Dom:         1 << dom.min,
+			Month:       1 << months.min,
+			Dow:         all(dow),
+			Location:    loc,
 		}, nil
 
 	case "@monthly":
 		return &SpecSchedule{
-			Second:   1 << seconds.min,
-			Minute:   1 << minutes.min,
-			Hour:     1 << hours.min,
-			Dom:      1 << dom.min,
-			Month:    all(months),
-			Dow:      all(dow),
-			Location: loc,
+			MilliSecond: bitmap,
+			Second:      1 << seconds.min,
+			Minute:      1 << minutes.min,
+			Hour:        1 << hours.min,
+			Dom:         1 << dom.min,
+			Month:       all(months),
+			Dow:         all(dow),
+			Location:    loc,
 		}, nil
 
 	case "@weekly":
 		return &SpecSchedule{
-			Second:   1 << seconds.min,
-			Minute:   1 << minutes.min,
-			Hour:     1 << hours.min,
-			Dom:      all(dom),
-			Month:    all(months),
-			Dow:      1 << dow.min,
-			Location: loc,
+			MilliSecond: bitmap,
+			Second:      1 << seconds.min,
+			Minute:      1 << minutes.min,
+			Hour:        1 << hours.min,
+			Dom:         all(dom),
+			Month:       all(months),
+			Dow:         1 << dow.min,
+			Location:    loc,
 		}, nil
 
 	case "@daily", "@midnight":
 		return &SpecSchedule{
-			Second:   1 << seconds.min,
-			Minute:   1 << minutes.min,
-			Hour:     1 << hours.min,
-			Dom:      all(dom),
-			Month:    all(months),
-			Dow:      all(dow),
-			Location: loc,
+			MilliSecond: bitmap,
+			Second:      1 << seconds.min,
+			Minute:      1 << minutes.min,
+			Hour:        1 << hours.min,
+			Dom:         all(dom),
+			Month:       all(months),
+			Dow:         all(dow),
+			Location:    loc,
 		}, nil
 
 	case "@hourly":
 		return &SpecSchedule{
-			Second:   1 << seconds.min,
-			Minute:   1 << minutes.min,
-			Hour:     all(hours),
-			Dom:      all(dom),
-			Month:    all(months),
-			Dow:      all(dow),
-			Location: loc,
+			MilliSecond: bitmap,
+			Second:      1 << seconds.min,
+			Minute:      1 << minutes.min,
+			Hour:        all(hours),
+			Dom:         all(dom),
+			Month:       all(months),
+			Dow:         all(dow),
+			Location:    loc,
 		}, nil
 
 	}

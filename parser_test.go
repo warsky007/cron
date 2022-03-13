@@ -8,6 +8,7 @@ import (
 )
 
 var secondParser = NewParser(Second | Minute | Hour | Dom | Month | DowOptional | Descriptor)
+var millisecondParser = NewParser(MilliSecond | Second | Minute | Hour | Dom | Month | DowOptional | Descriptor)
 
 func TestRange(t *testing.T) {
 	zero := uint64(0)
@@ -138,6 +139,15 @@ func TestParseScheduleErrors(t *testing.T) {
 }
 
 func TestParseSchedule(t *testing.T) {
+	bitmap1 := NewBitmap()
+	bitmap1.Set(milliseconds.min)
+	bitmap2 := NewBitmap()
+	for i := 0; i < 1000; i += 10 {
+		bitmap2.Set(uint(i))
+	}
+	bitmap3 := NewBitmap()
+	bitmap3.Set(270)
+
 	tokyo, _ := time.LoadLocation("Asia/Tokyo")
 	entries := []struct {
 		parser   Parser
@@ -159,13 +169,43 @@ func TestParseSchedule(t *testing.T) {
 			parser: secondParser,
 			expr:   "* 5 * * * *",
 			expected: &SpecSchedule{
-				Second:   all(seconds),
-				Minute:   1 << 5,
-				Hour:     all(hours),
-				Dom:      all(dom),
-				Month:    all(months),
-				Dow:      all(dow),
-				Location: time.Local,
+				MilliSecond: bitmap1,
+				Second:      all(seconds),
+				Minute:      1 << 5,
+				Hour:        all(hours),
+				Dom:         all(dom),
+				Month:       all(months),
+				Dow:         all(dow),
+				Location:    time.Local,
+			},
+		},
+
+		{
+			parser:millisecondParser,
+			expr:   "*/10 * * * * * *",
+			expected: &SpecSchedule{
+				MilliSecond: bitmap2,
+				Second:      all(seconds),
+				Minute:      all(minutes),
+				Hour:        all(hours),
+				Dom:         all(dom),
+				Month:       all(months),
+				Dow:         all(dow),
+				Location:    time.Local,
+			},
+		},
+		{
+			parser:millisecondParser,
+			expr:   "270 55 55 19 15 * *",
+			expected: &SpecSchedule{
+				MilliSecond: bitmap3,
+				Second:      1 << 55,
+				Minute:      1 << 55,
+				Hour:        1 << 19,
+				Dom:         1 << 15,
+				Month:       all(months),
+				Dow:         all(dow),
+				Location:    time.Local,
 			},
 		},
 	}
@@ -214,43 +254,55 @@ func TestNormalizeFields(t *testing.T) {
 			"AllFields_NoOptional",
 			[]string{"0", "5", "*", "*", "*", "*"},
 			Second | Minute | Hour | Dom | Month | Dow | Descriptor,
-			[]string{"0", "5", "*", "*", "*", "*"},
+			[]string{"0", "0", "5", "*", "*", "*", "*"},
 		},
 		{
 			"AllFields_SecondOptional_Provided",
 			[]string{"0", "5", "*", "*", "*", "*"},
 			SecondOptional | Minute | Hour | Dom | Month | Dow | Descriptor,
-			[]string{"0", "5", "*", "*", "*", "*"},
+			[]string{"0", "0", "5", "*", "*", "*", "*"},
 		},
 		{
 			"AllFields_SecondOptional_NotProvided",
 			[]string{"5", "*", "*", "*", "*"},
 			SecondOptional | Minute | Hour | Dom | Month | Dow | Descriptor,
-			[]string{"0", "5", "*", "*", "*", "*"},
+			[]string{"0", "0", "5", "*", "*", "*", "*"},
 		},
 		{
 			"SubsetFields_NoOptional",
 			[]string{"5", "15", "*"},
 			Hour | Dom | Month,
-			[]string{"0", "0", "5", "15", "*", "*"},
+			[]string{"0", "0", "0", "5", "15", "*", "*"},
 		},
 		{
 			"SubsetFields_DowOptional_Provided",
 			[]string{"5", "15", "*", "4"},
 			Hour | Dom | Month | DowOptional,
-			[]string{"0", "0", "5", "15", "*", "4"},
+			[]string{"0", "0", "0", "5", "15", "*", "4"},
 		},
 		{
 			"SubsetFields_DowOptional_NotProvided",
 			[]string{"5", "15", "*"},
 			Hour | Dom | Month | DowOptional,
-			[]string{"0", "0", "5", "15", "*", "*"},
+			[]string{"0", "0", "0", "5", "15", "*", "*"},
 		},
 		{
 			"SubsetFields_SecondOptional_NotProvided",
 			[]string{"5", "15", "*"},
 			SecondOptional | Hour | Dom | Month,
-			[]string{"0", "0", "5", "15", "*", "*"},
+			[]string{"0", "0", "0", "5", "15", "*", "*"},
+		},
+		{
+			"AllFields_NoOptional",
+			[]string{"500", "5", "*", "*", "*", "*", "*"},
+			MilliSecond | Second | Minute | Hour | Dom | Month | Dow | Descriptor,
+			[]string{"500", "5", "*", "*", "*", "*", "*"},
+		},
+		{
+			"SubsetFields_NoOptional",
+			[]string{"500", "5", "*", "*"},
+			MilliSecond | Minute | Hour | Dom,
+			[]string{"500", "0", "5", "*", "*", "*", "*"},
 		},
 	}
 
@@ -313,6 +365,9 @@ func TestNormalizeFields_Errors(t *testing.T) {
 }
 
 func TestStandardSpecSchedule(t *testing.T) {
+	bitmap := NewBitmap()
+	bitmap.Set(milliseconds.min)
+
 	entries := []struct {
 		expr     string
 		expected Schedule
@@ -320,7 +375,7 @@ func TestStandardSpecSchedule(t *testing.T) {
 	}{
 		{
 			expr:     "5 * * * *",
-			expected: &SpecSchedule{1 << seconds.min, 1 << 5, all(hours), all(dom), all(months), all(dow), time.Local},
+			expected: &SpecSchedule{bitmap, 1 << seconds.min, 1 << 5, all(hours), all(dom), all(months), all(dow), time.Local},
 		},
 		{
 			expr:     "@every 5m",
@@ -359,25 +414,34 @@ func TestNoDescriptorParser(t *testing.T) {
 }
 
 func every5min(loc *time.Location) *SpecSchedule {
-	return &SpecSchedule{1 << 0, 1 << 5, all(hours), all(dom), all(months), all(dow), loc}
+	bitmap := NewBitmap()
+	bitmap.Set(milliseconds.min)
+	return &SpecSchedule{bitmap, 1 << 0, 1 << 5, all(hours), all(dom), all(months), all(dow), loc}
 }
 
 func every5min5s(loc *time.Location) *SpecSchedule {
-	return &SpecSchedule{1 << 5, 1 << 5, all(hours), all(dom), all(months), all(dow), loc}
+	bitmap := NewBitmap()
+	bitmap.Set(milliseconds.min)
+	return &SpecSchedule{bitmap, 1 << 5, 1 << 5, all(hours), all(dom), all(months), all(dow), loc}
 }
 
 func midnight(loc *time.Location) *SpecSchedule {
-	return &SpecSchedule{1, 1, 1, all(dom), all(months), all(dow), loc}
+	bitmap := NewBitmap()
+	bitmap.Set(milliseconds.min)
+	return &SpecSchedule{bitmap, 1, 1, 1, all(dom), all(months), all(dow), loc}
 }
 
 func annual(loc *time.Location) *SpecSchedule {
+	bitmap := NewBitmap()
+	bitmap.Set(milliseconds.min)
 	return &SpecSchedule{
-		Second:   1 << seconds.min,
-		Minute:   1 << minutes.min,
-		Hour:     1 << hours.min,
-		Dom:      1 << dom.min,
-		Month:    1 << months.min,
-		Dow:      all(dow),
-		Location: loc,
+		MilliSecond: bitmap,
+		Second:      1 << seconds.min,
+		Minute:      1 << minutes.min,
+		Hour:        1 << hours.min,
+		Dom:         1 << dom.min,
+		Month:       1 << months.min,
+		Dow:         all(dow),
+		Location:    loc,
 	}
 }
