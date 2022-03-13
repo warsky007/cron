@@ -72,6 +72,11 @@ type Entry struct {
 	// It is kept around so that user code that needs to get at the job later,
 	// e.g. via Entries() can do so.
 	Job Job
+
+	// RunCount number of times the job run
+	// MaxRuns 	configuration for how many times to run the job
+	RunCount int
+	MaxRuns  int
 }
 
 // Valid returns true if this is not the zero entry.
@@ -159,12 +164,23 @@ func (c *Cron) AddJob(spec string, cmd Job) (EntryID, error) {
 	if err != nil {
 		return 0, err
 	}
-	return c.Schedule(schedule, cmd), nil
+	return c.Schedule(schedule, cmd, 0), nil
+}
+
+// AddFuncWithLimit adds a func to the Cron to be run on the given schedule and limit.
+// The spec is parsed using the time zone of this Cron instance as the default.
+// An opaque ID is returned that can be used to later remove it.
+func (c *Cron) AddFuncWithLimit(spec string, cmd func(), limit int) (EntryID, error) {
+	schedule, err := c.parser.Parse(spec)
+	if err != nil {
+		return 0, err
+	}
+	return c.Schedule(schedule, FuncJob(cmd), limit), nil
 }
 
 // Schedule adds a Job to the Cron to be run on the given schedule.
 // The job is wrapped with the configured Chain.
-func (c *Cron) Schedule(schedule Schedule, cmd Job) EntryID {
+func (c *Cron) Schedule(schedule Schedule, cmd Job, maxRuns int) EntryID {
 	c.runningMu.Lock()
 	defer c.runningMu.Unlock()
 	c.nextID++
@@ -173,6 +189,7 @@ func (c *Cron) Schedule(schedule Schedule, cmd Job) EntryID {
 		Schedule:   schedule,
 		WrappedJob: c.chain.Then(cmd),
 		Job:        cmd,
+		MaxRuns:    maxRuns,
 	}
 	if !c.running {
 		c.entries = append(c.entries, entry)
@@ -284,9 +301,14 @@ func (c *Cron) run() {
 					}
 					c.jobWaiter.Add(1)
 					c.gpool.Submit(taskFuncWrapper(e.WrappedJob, &c.jobWaiter))
-					e.Prev = e.Next
-					e.Next = e.Schedule.Next(now)
-					c.logger.Info("run", "now", now, "entry", e.ID, "next", e.Next)
+					e.RunCount++
+					if e.MaxRuns > 0 && e.RunCount >= e.MaxRuns {
+						c.removeEntry(e.ID)
+					} else {
+						e.Prev = e.Next
+						e.Next = e.Schedule.Next(now)
+						c.logger.Info("run", "now", now, "entry", e.ID, "next", e.Next)
+					}
 				}
 
 			case newEntry := <-c.add:
